@@ -1,2 +1,5 @@
-git+https://github.com/beyang/jedi.git@c4a51cba12bc4849e19c4aa25aeb30d66e5fd238
-git+https://github.com/sourcegraph/pydep.git@3e0a84f64d1667a6ed22e15b3b8dfca4e8f17cd7
+# git+https://github.com/davidhalter/jedi.git@dev#egg=jedi
+git+https://github.com/sourcegraph/pydep.git@6bd98a678e5262bd50e7e413627eed2c411b86e4
+virtualenv==13.1.0
+pip==7.1.0
+jedi==0.9.0

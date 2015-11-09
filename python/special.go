@@ -1,12 +1,9 @@
 package python
 
-import (
-	"sourcegraph.com/sourcegraph/srclib/repo"
-	"sourcegraph.com/sourcegraph/srclib/unit"
-)
+import "sourcegraph.com/sourcegraph/srclib/unit"
 
 type repoUnit struct {
-	Repo     repo.URI
+	Repo     string
 	Unit     string
 	UnitType string
 }
@@ -56,10 +53,3 @@ var specialUnits = map[string][]*unit.SourceUnit{
 	stdLibRepo:         []*unit.SourceUnit{stdLibPkg.SourceUnit()},
 	extensionsTestRepo: []*unit.SourceUnit{extensionsTestPkg.SourceUnit()},
 }
-
-/*
-var hardcodedDep = map[repoUnit][]*dep2.RawDependency{
-	repoUnit{stdLibRepo, stdLibUnit.Name(), DistPackageDisplayName}:                 nil,
-	repoUnit{extensionsTestRepo, extensionsTestUnit.Name(), DistPackageDisplayName}: nil,
-}
-*/

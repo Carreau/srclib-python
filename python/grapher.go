@@ -3,6 +3,7 @@ package python
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -11,7 +12,6 @@ import (
 	"strings"
 
 	"sourcegraph.com/sourcegraph/srclib/graph"
-	"sourcegraph.com/sourcegraph/srclib/grapher"
 	"sourcegraph.com/sourcegraph/srclib/unit"
 )
 
@@ -33,22 +33,86 @@ func NewGraphContext(unit *unit.SourceUnit) *GraphContext {
 
 // Graphs the Python source unit. If run outside of a Docker container, this assumes that the source unit has already
 // been installed (via pip or `python setup.py install`).
-func (c *GraphContext) Graph() (*grapher.Output, error) {
-	if os.Getenv("IN_DOCKER_CONTAINER") != "" {
-		// NOTE: this may cause an error when graphing any source unit that depends
-		// on jedi (or any other dependency of the graph code)
-		requirementFiles, err := filepath.Glob(filepath.Join(c.Unit.Dir, "*requirements*.txt"))
+func (c *GraphContext) Graph() (*graph.Output, error) {
+	pipBin := "pip"
+	pythonBin := "python"
+
+	if dockerEnv == "" {
+		dir, err := getProgramPath()
 		if err != nil {
 			return nil, err
 		}
-		runCmdLogError(exec.Command("pip", "install", "-I", c.Unit.Dir))
-		for _, requirementFile := range requirementFiles {
-			runCmdLogError(exec.Command("pip", "install", "-r", requirementFile))
+
+		tempDir, err := ioutil.TempDir("", "srclib-python-graph")
+		if err != nil {
+			return nil, err
+		}
+		defer os.RemoveAll(tempDir)
+		envDir := filepath.Join(tempDir, ".env")
+
+		// Use binaries from our virtual env.
+		pipBin = filepath.Join(dir, ".env", getEnvBinDir(), "pip")
+		pythonBin = filepath.Join(dir, ".env", getEnvBinDir(), "python")
+
+		if _, err := os.Stat(filepath.Join(envDir)); os.IsNotExist(err) {
+			log.Println("Creating virtual env")
+			// We don't have virtual env for this SourceUnit, create one.
+
+			cmd := exec.Command(filepath.Join(dir, ".env", getEnvBinDir(), "virtualenv"), envDir)
+			if err := runCmdStderr(cmd); err != nil {
+				return nil, err
+			}
+
+			// using python and pip from temporary env directory
+			pipBin = filepath.Join(envDir, getEnvBinDir(), "pip")
+			pythonBin = filepath.Join(envDir, getEnvBinDir(), "python")
+
+			log.Println("Installing srclib-python requirements")
+			// Install our dependencies.
+			// Todo(MaikuMori): Use symlinks from toolchains virtualenv to project virtual env.
+			// NOTE: If SourceUnit requirements overwrite our requirements, things will fail.
+			// 			 We could install them last, but then we would have to do this before each
+			//			 graphing which noticably increases graphing time (since our deps are always
+			//       downloaded by pip due to dependency on git commit not actual package version).
+			requirementFile := filepath.Join(dir, "requirements.txt")
+			if err := runCmdStderr(exec.Command(pipBin, 
+				"--isolated",  
+				"--disable-pip-version-check", 
+				"install", 
+				"-r", 
+				requirementFile)); err != nil {
+				return nil, err
+			}
+			log.Println("Updating srclib-python project in editable mode")
+			if err := runCmdStderr(exec.Command(pipBin, "install", "-e", dir)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	cmd := exec.Command("python", "-m", "grapher.graph", "--dir", c.Unit.Dir, "--verbose")
+	// NOTE: this may cause an error when graphing any source unit that depends
+	// on jedi (or any other dependency of the graph code)
+	requirementFiles, err := filepath.Glob(filepath.Join(c.Unit.Dir, "*requirements*.txt"))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(c.Unit.Dir, "setup.py")); !os.IsNotExist(err) {
+		log.Println("Re-installing unit")
+		runCmdLogError(exec.Command(pipBin, 
+				"--isolated",  
+				"--disable-pip-version-check", 
+				"install", 
+				"-I", 
+				c.Unit.Dir))
+	}
+	log.Println("Installing unit requirements")
+	installPipRequirements(pipBin, requirementFiles)
+
+	log.Println("Building graph")
+	cmd := exec.Command(pythonBin, "-m", "grapher.graph", "--verbose", "--dir", c.Unit.Dir, "--files")
+	cmd.Args = append(cmd.Args, c.Unit.Files...)
 	cmd.Stderr = os.Stderr
+	log.Printf("Running %v", cmd.Args)
 	b, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -63,8 +127,8 @@ func (c *GraphContext) Graph() (*grapher.Output, error) {
 	return out, nil
 }
 
-func (c *GraphContext) transform(raw *RawOutput, unit *unit.SourceUnit) *grapher.Output {
-	var out grapher.Output
+func (c *GraphContext) transform(raw *RawOutput, unit *unit.SourceUnit) *graph.Output {
+	var out graph.Output
 
 	for _, def := range raw.Defs {
 		out.Defs = append(out.Defs, c.transformDef(def))
@@ -101,12 +165,12 @@ func (c *GraphContext) transformDef(rawDef *RawDef) *graph.Def {
 			Repo:     c.Unit.Repo,
 			Unit:     c.Unit.Name,
 			UnitType: c.Unit.Type,
-			Path:     graph.DefPath(rawDef.Path),
+			Path:     string(rawDef.Path),
 		},
-		TreePath: graph.TreePath(rawDef.Path), // TODO: make this consistent w/ old way
+		TreePath: string(rawDef.Path), // TODO: make this consistent w/ old way
 		Kind:     jediKindToDefKind[rawDef.Kind],
 		Name:     rawDef.Name,
-		File:     rawDef.File,
+		File:     filepath.ToSlash(rawDef.File),
 		DefStart: rawDef.DefStart,
 		DefEnd:   rawDef.DefEnd,
 		Exported: rawDef.Exported,
@@ -120,7 +184,7 @@ func (c *GraphContext) transformRef(rawRef *RawRef) (*graph.Ref, error) {
 		return nil, err
 	}
 
-	defPath := graph.DefPath(rawRef.DefPath)
+	defPath := string(rawRef.DefPath)
 	if defPath == "" {
 		defPath = "."
 	}
@@ -129,13 +193,13 @@ func (c *GraphContext) transformRef(rawRef *RawRef) (*graph.Ref, error) {
 		DefRepo:     defUnit.Repo,
 		DefUnitType: defUnit.Type,
 		DefUnit:     defUnit.Name,
-		DefPath:     defPath,
+		DefPath:     filepath.ToSlash(defPath),
 
 		Repo:     c.Unit.Repo,
 		Unit:     c.Unit.Name,
 		UnitType: c.Unit.Type,
 
-		File:  rawRef.File,
+		File:  filepath.ToSlash(rawRef.File),
 		Start: rawRef.Start,
 		End:   rawRef.End,
 		Def:   rawRef.Def,
@@ -143,7 +207,19 @@ func (c *GraphContext) transformRef(rawRef *RawRef) (*graph.Ref, error) {
 }
 
 func (c *GraphContext) transformDefDoc(rawDef *RawDef) *graph.Doc {
-	return nil
+	if rawDef.Docstring != "" {
+		return &graph.Doc{
+			DefKey: graph.DefKey{
+				Repo:     c.Unit.Repo,
+				Unit:     c.Unit.Name,
+				UnitType: c.Unit.Type,
+				Path:     string(rawDef.Path),
+			},
+			Data: rawDef.Docstring,
+		}
+	} else {
+		return nil
+	}
 }
 
 func (c *GraphContext) inferSourceUnit(rawRef *RawRef, reqs []*requirement) (*unit.SourceUnit, error) {
@@ -174,7 +250,7 @@ func (c *GraphContext) inferSourceUnitFromFile(file string, reqs []*requirement)
 		fileSubCmps := fileCmps[pkgsDirIdx+1:]
 		fileSubPath := filepath.Join(fileSubCmps...)
 
-		var foundReq *requirement = nil
+		var foundReq *requirement
 	FindReq:
 		for _, req := range reqs {
 			for _, pkg := range req.Packages {
@@ -192,26 +268,38 @@ func (c *GraphContext) inferSourceUnitFromFile(file string, reqs []*requirement)
 		}
 
 		if foundReq == nil {
-			var candidatesStr string
-			if len(reqs) <= 7 {
-				candidatesStr = fmt.Sprintf("%v", reqs)
-			} else {
-				candidatesStr = fmt.Sprintf("%v...", reqs[:7])
+			var formattedCanditates []string
+			end := ""
+			candiates := reqs
+
+			if len(reqs) > 7 {
+				candiates = reqs[:7]
+				end = ", ..."
 			}
+
+			for _, candidate := range candiates {
+				formattedCanditates = append(formattedCanditates, fmt.Sprintf("%v", *candidate))
+			}
+
 			return nil, fmt.Errorf("Could not find requirement that contains file %s. Candidates were: %s",
-				file, candidatesStr)
+				file, strings.Join(formattedCanditates, ", ")+end)
 		}
 
 		return foundReq.SourceUnit(), nil
 	}
 
-	// Case 3: in std lib
+	// Case 3: in std lib (.env/lib optionally followed by python..)
 	pythonDirIdx := -1
+	prev := ``
 	for i, cmp := range fileCmps {
-		if strings.HasPrefix(cmp, "python") {
+		if cmp == "lib" && prev == ".env"  {
+			pythonDirIdx = i
+			break
+		} else if strings.EqualFold(cmp, "lib") && strings.HasPrefix(strings.ToLower(prev), "python")  {
 			pythonDirIdx = i
 			break
 		}
+		prev = cmp
 	}
 	if pythonDirIdx != -1 {
 		return stdLibPkg.SourceUnit(), nil
@@ -243,8 +331,8 @@ type RawDef struct {
 	Kind      string
 	Name      string
 	File      string // relative path (to source unit directory)
-	DefStart  int
-	DefEnd    int
+	DefStart  uint32
+	DefEnd    uint32
 	Exported  bool
 	Docstring string
 	Data      interface{}
@@ -255,7 +343,23 @@ type RawRef struct {
 	Def       bool
 	DefFile   string // absolute path
 	File      string // relative path (to source unit directory)
-	Start     int
-	End       int
+	Start     uint32
+	End       uint32
 	ToBuiltin bool
+}
+
+func installPipRequirements(pipBin string, requirementFiles []string) {
+	for _, requirementFile := range requirementFiles {
+		err := runCmdStderr(exec.Command(pipBin, "install", "-r", requirementFile))
+		if err != nil {
+			log.Printf("Error installing dependencies in %s. Trying piecemeal install", requirementFile)
+			if b, err := ioutil.ReadFile(requirementFile); err == nil {
+				for _, req := range strings.Split(string(b), "\n") {
+					runCmdLogError(exec.Command(pipBin, "install", req))
+				}
+			} else {
+				log.Printf("Could not read %s: %s", requirementFile, err)
+			}
+		}
+	}
 }

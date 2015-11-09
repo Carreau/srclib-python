@@ -1,21 +1,33 @@
+ifeq ($(IN_DOCKER_CONTAINER),true)
+	PIP = pip
+else ifeq ($(OS),Windows_NT)
+	EXE = .bin/srclib-python.exe
+	PIP = cmd /C .env\\Scripts\\pip.exe --isolated --disable-pip-version-check
+else
+	EXE = .bin/srclib-python
+	PIP = .env/bin/pip
+endif
+
 .PHONY: install install-docker update-dockerfile
 
 all: install update-dockerfile
 
-install:
+.env:
+	bash ./install_env.sh
+
+$(EXE): $(shell /usr/bin/find . -type f -name '*.go')
 	@mkdir -p .bin
 	go get -d ./...
-	go build -o .bin/srclib-python
-	sudo pip install -r requirements.txt --upgrade
-	sudo pip install . --upgrade
+	go build -o $(EXE)
 
-test-dependencies:
-	sudo pip install -r .test.requirements.txt --upgrade
+install: .env $(EXE)
+	$(PIP) install -r requirements.txt --upgrade
+	$(PIP) install . --upgrade
 
 update-dockerfile:
 	src toolchain build sourcegraph.com/sourcegraph/srclib-python
 
-install-docker:
+install-docker: .env
 	go install .
-	pip install -r requirements.txt --upgrade
-	pip install . --upgrade
+	$(PIP) install -r requirements.txt --upgrade
+	$(PIP) install . --upgrade

@@ -1,13 +1,9 @@
 package python
 
 import (
-	"encoding/json"
-	"math/rand"
 	"testing"
 
-	"github.com/jmoiron/sqlx/types"
 	"sourcegraph.com/sourcegraph/srclib/graph"
-	"sourcegraph.com/sourcegraph/srclib/repo"
 )
 
 func TestDefFormatter_Name(t *testing.T) {
@@ -50,33 +46,21 @@ func TestDefFormatter_Name(t *testing.T) {
 	}
 }
 
-func defDataJSON(si defData) types.JsonText {
-	b, err := json.Marshal(si)
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
-
 type defInfo struct {
-	SID         graph.SID
-	Repo        repo.URI
+	SID         int
+	Repo        string
 	CommitID    string
 	UnitType    string
 	Unit        string
 	Path        string
 	File        string
 	Name        string
-	TreePath    graph.TreePath
+	TreePath    string
 	NotExported bool
 	Data        []byte
 }
 
 func (s defInfo) Def() *graph.Def {
-	sid := s.SID
-	if sid == 0 {
-		sid = graph.SID(rand.Int63())
-	}
 	repo := s.Repo
 	if repo == "" {
 		repo = "r"
@@ -94,8 +78,7 @@ func (s defInfo) Def() *graph.Def {
 		data = []byte(`{}`)
 	}
 	return &graph.Def{
-		SID:      sid,
-		DefKey:   graph.DefKey{Repo: repo, CommitID: s.CommitID, UnitType: unitType, Unit: unit, Path: graph.DefPath(s.Path)},
+		DefKey:   graph.DefKey{Repo: repo, CommitID: s.CommitID, UnitType: unitType, Unit: unit, Path: string(s.Path)},
 		Name:     s.Name,
 		File:     s.File,
 		TreePath: s.TreePath,

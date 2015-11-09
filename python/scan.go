@@ -9,16 +9,22 @@ import (
 
 	"github.com/kr/fs"
 
-	"sourcegraph.com/sourcegraph/srclib/repo"
+	"sourcegraph.com/sourcegraph/srclib"
 	"sourcegraph.com/sourcegraph/srclib/unit"
 )
 
+// Scan a directory, listing all source units
 func Scan(srcdir string, repoURI string, repoSubdir string) ([]*unit.SourceUnit, error) {
 	if units, isSpecial := specialUnits[repoURI]; isSpecial {
 		return units, nil
 	}
 
-	cmd := exec.Command("pydep-run.py", "list", srcdir)
+	p, err := getVENVBinPath()
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.Command(filepath.Join(p, "python"), filepath.Join(p, "pydep-run.py"), "list", srcdir)
 
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
@@ -38,11 +44,14 @@ func Scan(srcdir string, repoURI string, repoSubdir string) ([]*unit.SourceUnit,
 		return nil, err
 	}
 
+	// Keep track of all files that have been successfully discovered
+	discoveredScripts := make(map[string]bool)
+
 	units := make([]*unit.SourceUnit, len(pkgs))
 	for i, pkg := range pkgs {
 		units[i] = pkg.SourceUnit()
-		units[i].Files = pythonSourceFiles(pkg.RootDir)
-		units[i].Repo = repo.URI(repoURI) // override whatever's in the setup.py file with the actual repository URI
+		units[i].Files = pythonSourceFiles(pkg.RootDir, discoveredScripts)
+		units[i].Repo = repoURI // override whatever's in the setup.py file with the actual reposit;5Dory URI
 
 		reqs, err := requirements(pkg.RootDir)
 		if err != nil {
@@ -55,11 +64,38 @@ func Scan(srcdir string, repoURI string, repoSubdir string) ([]*unit.SourceUnit,
 		units[i].Dependencies = reqs_
 	}
 
+	// Scan for independant scripts, appending to the current set of source units
+	scripts := pythonSourceFiles(srcdir, discoveredScripts)
+	if len(scripts) > 0 {
+		scriptsUnit := unit.SourceUnit{
+			Name:  ".",
+			Type:  "PythonProgram",
+			Files: scripts,
+			Dir:   ".",
+			Ops:   map[string]*srclib.ToolRef{"depresolve": nil, "graph": nil},
+		}
+
+		reqs, err := requirements(srcdir)
+		if err == nil {
+			reqs_ := make([]interface{}, len(reqs))
+			for i, req := range reqs {
+				reqs_[i] = req
+			}
+			scriptsUnit.Dependencies = reqs_
+		}
+
+		units = append(units, &scriptsUnit)
+	}
+
 	return units, nil
 }
 
 func requirements(unitDir string) ([]*requirement, error) {
-	depCmd := exec.Command("pydep-run.py", "dep", unitDir)
+	p, err := getVENVBinPath()
+	if err != nil {
+		return nil, err
+	}
+	depCmd := exec.Command(filepath.Join(p, "python"), filepath.Join(p, "pydep-run.py"), "dep", unitDir)
 	depCmd.Stderr = os.Stderr
 	b, err := depCmd.Output()
 	if err != nil {
@@ -84,12 +120,17 @@ func requirements(unitDir string) ([]*requirement, error) {
 }
 
 // Get all python source files under dir
-func pythonSourceFiles(dir string) (files []string) {
+func pythonSourceFiles(dir string, discoveredScripts map[string]bool) (files []string) {
 	walker := fs.Walk(dir)
 	for walker.Step() {
 		if err := walker.Err(); err == nil && !walker.Stat().IsDir() && filepath.Ext(walker.Path()) == ".py" {
-			file, _ := filepath.Rel(dir, walker.Path())
-			files = append(files, file)
+			file := walker.Path()
+			_, found := discoveredScripts[file]
+
+			if !found {
+				files = append(files, filepath.ToSlash(file))
+				discoveredScripts[file] = true
+			}
 		}
 	}
 	return
